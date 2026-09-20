@@ -1,0 +1,11 @@
+streamlit==1.50.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+ultralytics
+opencv-python-headless
+imageio
+imageio-ffmpeg
+pandas
+numpy
+scikit-learn
