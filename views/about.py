@@ -27,7 +27,6 @@ if core.files_ready():
     st.caption(f"Persistence = consecutive abnormal clips / {cfg['P_MAX']} (max 1.0). "
                f"Cut-offs: Low < {cu[0]:.2f} <= Medium < {cu[1]:.2f} <= High < {cu[2]:.2f} <= Critical.")
 
-st.subheader("Performance on held-out test clips")
 path = os.path.join(core.BASE, "results", "threat_scores.csv")
 if os.path.exists(path):
     df = pd.read_csv(path)
