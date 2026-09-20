@@ -46,7 +46,7 @@ st.subheader("Alert log")
 log_ph = st.empty()
 
 if not on:
-    banner_ph.info("Monitoring off. Source select panni **Start monitoring** toggle-ah on pannunga.")
+    banner_ph.info("Monitoring off. Select source and toggle **Start monitoring**.")
     st.stop()
 
 if source == "" or source is None:
