@@ -4,6 +4,7 @@ from collections import deque
 import cv2
 import pandas as pd
 import streamlit as st
+import alerting
 import core
 import ui
 
@@ -32,6 +33,15 @@ with ctrl:
     zone_name = st.selectbox("Camera zone risk", list(core.ZONES))
     thresh = st.slider("Abnormal threshold", 0.05, 0.95, float(cfg["THRESH"]), 0.01)
     show_boxes = st.checkbox("Show person boxes (slower)", value=True)
+
+    st.subheader("Alert rules")
+    min_level = st.select_slider("Alert when level is at least", options=["Medium", "High", "Critical"], value="High")
+    cooldown = st.slider("Minimum gap between alerts (seconds)", 5, 60, 15)
+    sound = st.checkbox("Sound alarm on this laptop", value=True)
+    with st.expander("Telegram notification (optional)"):
+        tg_token = st.text_input("Bot token", type="password")
+        tg_chat = st.text_input("Chat ID")
+
     on = st.toggle("Start monitoring")
     st.caption("Stop panna toggle-ah off pannunga.")
 
@@ -42,11 +52,11 @@ with view:
 
 st.subheader("Live threat timeline")
 chart_ph = st.empty()
-st.subheader("Alert log")
+st.subheader("Alerts triggered")
 log_ph = st.empty()
 
 if not on:
-    banner_ph.info("Monitoring off. Select source and toggle **Start monitoring**.")
+    banner_ph.info("Monitoring off. Select source **Start monitoring** on toggle .")
     st.stop()
 
 if source == "" or source is None:
@@ -72,9 +82,9 @@ INIT = {"conf": 0.0, "flag": False, "run": 0, "score": 0.0, "level": "Normal"}
 state = dict(INIT)
 feats = deque(maxlen=core.CLIP_LEN)
 history = deque(maxlen=120)
-alerts = []
+fired = []
 n_sampled, frame_no, n_clips = 0, 0, 0
-last_t = 0.0
+last_t, last_alert = 0.0, 0.0
 proc = deque(maxlen=20)
 
 try:
@@ -105,6 +115,7 @@ try:
         feats.append(core.frame_feature(cnn, rgb))
         n_sampled += 1
         boxes = core.yolo_boxes(yolo, rgb) if show_boxes else []
+        alert_now = False
 
         if len(feats) == core.CLIP_LEN and (n_sampled - core.CLIP_LEN) % core.STRIDE == 0:
             prob = core.clip_prob(lstm, list(feats))
@@ -112,22 +123,39 @@ try:
             n_clips += 1
             history.append({"abnormal confidence": state["conf"], "threat score": state["score"]})
             chart_ph.line_chart(pd.DataFrame(list(history)))
-            if state["flag"]:
-                alerts.append({"Time": time.strftime("%H:%M:%S"), "Level": state["level"],
-                               "Score": round(state["score"], 2),
-                               "Confidence": round(state["conf"], 2),
-                               "Persistence": state["run"]})
-                log_ph.dataframe(pd.DataFrame(alerts[-10:][::-1]), hide_index=True)
+
+            if alerting.should_alert(state["level"], min_level, last_alert, cooldown):
+                alert_now = True
+                last_alert = time.time()
+                snap = alerting.save_snapshot(core.annotate(rgb, boxes, state))
+                notified = "-"
+                if sound:
+                    alerting.beep(state["level"])
+                if tg_token and tg_chat:
+                    alerting.send_telegram(
+                        tg_token, tg_chat,
+                        f"ALERT {state['level'].upper()} | score {state['score']:.2f} | zone: {zone_name}",
+                        snap)
+                    notified = "Telegram"
+                alerting.log_alert(state, zone_name, snap, notified)
+                st.toast(f"ALERT: {state['level'].upper()} (score {state['score']:.2f})", icon="🚨")
+                fired.append({"Time": time.strftime("%H:%M:%S"), "Level": state["level"],
+                              "Score": round(state["score"], 2),
+                              "Confidence": round(state["conf"], 2),
+                              "Persistence": state["run"], "Notified": notified})
+                log_ph.dataframe(pd.DataFrame(fired[-10:][::-1]), hide_index=True)
+
             lvl = state["level"]
             if lvl == "Normal":
                 banner_ph.markdown(ui.banner("Normal", "NORMAL", "No threat detected"),
                                    unsafe_allow_html=True)
             else:
-                banner_ph.markdown(
-                    ui.banner(lvl, f"THREAT: {lvl.upper()}",
-                              f"score {state['score']:.2f}  |  confidence {state['conf']:.2f}  |  "
-                              f"persistence {state['run']} clips"),
-                    unsafe_allow_html=True)
+                sub = (f"score {state['score']:.2f}  |  confidence {state['conf']:.2f}  |  "
+                       f"persistence {state['run']} clips")
+                if alert_now:
+                    sub += "  |  ALERT TRIGGERED"
+                banner_ph.markdown(ui.banner(lvl, f"THREAT: {lvl.upper()}", sub),
+                                   unsafe_allow_html=True)
 
         video_ph.image(core.annotate(rgb, boxes, state), channels="RGB")
         proc.append(time.time() - tic)
