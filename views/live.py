@@ -16,7 +16,17 @@ if not core.files_ready():
     st.stop()
 cfg = core.get_cfg()
 
-ctrl, view = st.columns([2, 3], gap="large")
+# ---------------- status row (monitoring / level / telegram) ----------------
+status_row = st.columns(3)
+mon_ph, lvl_ph, tg_ph = status_row[0].empty(), status_row[1].empty(), status_row[2].empty()
+
+tg_status, tg_color = alerting.status_text()
+mon_ph.markdown(ui.metric_card("Monitoring", "Stopped", "toggle below to start"), unsafe_allow_html=True)
+lvl_ph.markdown(ui.metric_card("Current Level", "—", "no data yet"), unsafe_allow_html=True)
+tg_ph.markdown(ui.metric_card("Telegram Alerts", tg_status), unsafe_allow_html=True)
+
+st.write("")
+ctrl, view = st.columns([1, 2], gap="large")
 
 with ctrl:
     st.subheader("Camera source")
@@ -33,17 +43,10 @@ with ctrl:
     zone_name = st.selectbox("Camera zone risk", list(core.ZONES))
     thresh = st.slider("Abnormal threshold", 0.05, 0.95, float(cfg["THRESH"]), 0.01)
     show_boxes = st.checkbox("Show person boxes (slower)", value=True)
-
-    st.subheader("Alert rules")
-    min_level = st.select_slider("Alert when level is at least", options=["Medium", "High", "Critical"], value="High")
-    cooldown = st.slider("Minimum gap between alerts (seconds)", 5, 60, 15)
-    sound = st.checkbox("Sound alarm on this laptop", value=True)
-    with st.expander("Telegram notification (optional)"):
-        tg_token = st.text_input("Bot token", type="password")
-        tg_chat = st.text_input("Chat ID")
-
     on = st.toggle("Start monitoring")
     st.caption("Stop panna toggle-ah off pannunga.")
+    if not tg_status.startswith("Configured"):
+        st.caption("⚠️ Telegram not configured — add TELEGRAM_TOKEN and TELEGRAM_CHAT_ID to .env")
 
 with view:
     banner_ph = st.empty()
@@ -52,11 +55,11 @@ with view:
 
 st.subheader("Live threat timeline")
 chart_ph = st.empty()
-st.subheader("Alerts triggered")
+st.subheader("Alert log")
 log_ph = st.empty()
 
 if not on:
-    banner_ph.info("Monitoring off. Select source **Start monitoring** on toggle .")
+    banner_ph.info("Monitoring off. Source select panni **Start monitoring** toggle-ah on pannunga.")
     st.stop()
 
 if source == "" or source is None:
@@ -65,6 +68,8 @@ if source == "" or source is None:
 if isinstance(source, str) and kind.startswith("Simulated") and not os.path.exists(source):
     st.error("Antha video file illa. Path-ah check pannunga.")
     st.stop()
+
+mon_ph.markdown(ui.metric_card("Monitoring", "Active", kind.split(" (")[0]), unsafe_allow_html=True)
 
 cnn, lstm, yolo = core.load_models()
 cap = core.open_capture(source)
@@ -82,9 +87,9 @@ INIT = {"conf": 0.0, "flag": False, "run": 0, "score": 0.0, "level": "Normal"}
 state = dict(INIT)
 feats = deque(maxlen=core.CLIP_LEN)
 history = deque(maxlen=120)
-fired = []
+alerts = []
 n_sampled, frame_no, n_clips = 0, 0, 0
-last_t, last_alert = 0.0, 0.0
+last_t = 0.0
 proc = deque(maxlen=20)
 
 try:
@@ -115,7 +120,6 @@ try:
         feats.append(core.frame_feature(cnn, rgb))
         n_sampled += 1
         boxes = core.yolo_boxes(yolo, rgb) if show_boxes else []
-        alert_now = False
 
         if len(feats) == core.CLIP_LEN and (n_sampled - core.CLIP_LEN) % core.STRIDE == 0:
             prob = core.clip_prob(lstm, list(feats))
@@ -124,40 +128,31 @@ try:
             history.append({"abnormal confidence": state["conf"], "threat score": state["score"]})
             chart_ph.line_chart(pd.DataFrame(list(history)))
 
-            if alerting.should_alert(state["level"], min_level, last_alert, cooldown):
-                alert_now = True
-                last_alert = time.time()
-                snap = alerting.save_snapshot(core.annotate(rgb, boxes, state))
-                notified = "-"
-                if sound:
-                    alerting.beep(state["level"])
-                if tg_token and tg_chat:
-                    alerting.send_telegram(
-                        tg_token, tg_chat,
-                        f"ALERT {state['level'].upper()} | score {state['score']:.2f} | zone: {zone_name}",
-                        snap)
-                    notified = "Telegram"
-                alerting.log_alert(state, zone_name, snap, notified)
-                st.toast(f"ALERT: {state['level'].upper()} (score {state['score']:.2f})", icon="🚨")
-                fired.append({"Time": time.strftime("%H:%M:%S"), "Level": state["level"],
-                              "Score": round(state["score"], 2),
-                              "Confidence": round(state["conf"], 2),
-                              "Persistence": state["run"], "Notified": notified})
-                log_ph.dataframe(pd.DataFrame(fired[-10:][::-1]), hide_index=True)
+            sent, reason = False, "level below alert threshold"
+            if state["flag"]:
+                sent, reason = alerting.send_alert(bgr, state["level"], state["score"])
+                alerts.append({"Time": time.strftime("%H:%M:%S"), "Level": state["level"],
+                               "Score": round(state["score"], 2),
+                               "Confidence": round(state["conf"], 2),
+                               "Persistence": state["run"],
+                               "Telegram": "sent" if sent else reason})
+                log_ph.dataframe(pd.DataFrame(alerts[-10:][::-1]), hide_index=True)
 
             lvl = state["level"]
+            lvl_ph.markdown(ui.metric_card("Current Level", lvl, f"score {state['score']:.2f}"),
+                            unsafe_allow_html=True)
             if lvl == "Normal":
                 banner_ph.markdown(ui.banner("Normal", "NORMAL", "No threat detected"),
                                    unsafe_allow_html=True)
             else:
-                sub = (f"score {state['score']:.2f}  |  confidence {state['conf']:.2f}  |  "
-                       f"persistence {state['run']} clips")
-                if alert_now:
-                    sub += "  |  ALERT TRIGGERED"
-                banner_ph.markdown(ui.banner(lvl, f"THREAT: {lvl.upper()}", sub),
-                                   unsafe_allow_html=True)
+                tg_note = "  |  Telegram alert sent" if sent else f"  |  Telegram: {reason}"
+                banner_ph.markdown(
+                    ui.banner(lvl, f"THREAT: {lvl.upper()}",
+                              f"score {state['score']:.2f}  |  confidence {state['conf']:.2f}  |  "
+                              f"persistence {state['run']} clips{tg_note}"),
+                    unsafe_allow_html=True)
 
-        video_ph.image(core.annotate(rgb, boxes, state), channels="RGB")
+        video_ph.image(core.annotate(rgb, boxes, state), channels="RGB", use_container_width=True)
         proc.append(time.time() - tic)
         fps = len(proc) / max(sum(proc), 1e-6)
         note = "" if fps >= 5 else "  |  processing slow, boxes off panni try pannunga"
